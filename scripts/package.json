@@ -1,0 +1,9 @@
+{
+  "name": "aide-reminders",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Background job that checks Firestore for due tasks and sends push notifications.",
+  "dependencies": {
+    "firebase-admin": "^12.1.0"
+  }
+}
