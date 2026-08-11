@@ -3,16 +3,20 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>AIDE — Voice Task Reminder</title>
+<title>J.A.R.V.I.S — Voice Task Reminder</title>
 <link rel="manifest" href="./manifest.json">
 <meta name="theme-color" content="#0a0e17">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="AIDE">
+<meta name="apple-mobile-web-app-title" content="J.A.R.V.I.S">
 <link rel="apple-touch-icon" href="./icons/icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="./firebase-config.js"></script>
 <style>
   :root{
     --bg: #0a0e17;
@@ -295,8 +299,34 @@
 </div>
 
 <script>
-  // Standalone storage shim — replaces Claude's artifact-only window.storage
-  // with real browser localStorage, so this app works once hosted on its own.
+  // ====== FIREBASE CONFIG — paste your values here once you have them ======
+  const firebaseConfig = {
+    apiKey: "AIzaSyBXnbaoCSQuIg6LPUzX6MtibAje9XTaSIo",
+    authDomain: "jarvis-2809.firebaseapp.com",
+    projectId: "jarvis-2809",
+    storageBucket: "jarvis-2809.firebasestorage.app",
+    messagingSenderId: "134063891790",
+    appId: "1:134063891790:web:974a593211dfc3346eaa1f"
+  };
+  const VAPID_KEY = "BKQVUjhkelksOQH3Nmn3Is0D7q7cBz0-xDbyz6ezYL5R954SYvjOqTb7u4RI7x4Bvz-qG7ocbYcouBFhIEScfLE";
+  // ===========================================================================
+</script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js"></script>
+<script>
+  // Cross-device sync layer — Firestore replaces plain localStorage as the source
+  // of truth, with localStorage kept only as an instant-load offline cache.
+  let db = null, messaging = null, fbReady = false;
+  try{
+    if(firebaseConfig.apiKey !== "PASTE_API_KEY"){
+      firebase.initializeApp(firebaseConfig);
+      db = firebase.firestore();
+      try{ messaging = firebase.messaging(); }catch(e){ console.warn('Messaging not supported here', e); }
+      fbReady = true;
+    }
+  }catch(e){ console.warn('Firebase init skipped', e); }
+
   window.storage = {
     async get(key){
       const raw = localStorage.getItem('aide:'+key);
@@ -305,10 +335,17 @@
     },
     async set(key, value){
       localStorage.setItem('aide:'+key, value);
+      if(fbReady && db){
+        try{ await db.collection('aide').doc(key).set({ value, updatedAt: Date.now() }); }
+        catch(e){ console.warn('Cloud sync failed, saved locally only', e); }
+      }
       return { key, value, shared: false };
     },
     async delete(key){
       localStorage.removeItem('aide:'+key);
+      if(fbReady && db){
+        try{ await db.collection('aide').doc(key).delete(); }catch(e){}
+      }
       return { key, deleted: true, shared: false };
     },
     async list(prefix){
@@ -318,9 +355,36 @@
       return { keys, prefix, shared: false };
     }
   };
+
+  // Live sync: when another device changes tasks/settings, reflect it here immediately.
+  function watchCloud(key, onChange){
+    if(!fbReady || !db) return;
+    db.collection('aide').doc(key).onSnapshot(doc => {
+      if(doc.exists){
+        const data = doc.data();
+        localStorage.setItem('aide:'+key, data.value);
+        onChange(data.value);
+      }
+    });
+  }
+
+  async function registerPush(){
+    if(!fbReady || !messaging) return;
+    try{
+      const permission = await Notification.requestPermission();
+      if(permission !== 'granted') return;
+      const reg = await navigator.serviceWorker.ready;
+      const token = await messaging.getToken({ vapidKey: VAPID_KEY, serviceWorkerRegistration: reg });
+      if(token && db){
+        await db.collection('devices').doc(token).set({ token, updatedAt: Date.now(), ua: navigator.userAgent });
+      }
+    }catch(e){ console.warn('Push registration failed', e); }
+  }
+
   if('serviceWorker' in navigator){
     window.addEventListener('load', () => {
       navigator.serviceWorker.register('./service-worker.js').catch(e => console.warn('SW registration failed', e));
+      navigator.serviceWorker.register('./firebase-messaging-sw.js').catch(e => console.warn('Messaging SW registration failed', e));
     });
   }
 </script>
@@ -631,6 +695,7 @@
     const perm = await Notification.requestPermission();
     settings.notif = perm === 'granted';
     saveSettings();
+    if(settings.notif && typeof registerPush === 'function') await registerPush();
     $('enableNotif').textContent = settings.notif ? 'NOTIFICATIONS ENABLED' : 'PERMISSION DENIED';
   };
 
@@ -651,6 +716,16 @@
     setInterval(updateClock, 1000);
     setInterval(checkDue, 15000);
     checkDue();
+
+    // Live cross-device sync — reflect changes made on your other device immediately
+    if(typeof watchCloud === 'function'){
+      watchCloud('tasks', raw => { try{ tasks = JSON.parse(raw); render(); }catch(e){} });
+      watchCloud('settings', raw => { try{
+        settings = Object.assign(settings, JSON.parse(raw));
+        $('userName').value = settings.name || '';
+        updateClock();
+      }catch(e){} });
+    }
   }
   init();
 })();
