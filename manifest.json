@@ -1,4 +1,5 @@
 {
+  "id": "/aide-app/",
   "name": "AIDE — Voice Task Reminder",
   "short_name": "AIDE",
   "description": "A personal voice-powered task assistant that reminds you what's due, out loud.",
